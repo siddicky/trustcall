@@ -1898,10 +1898,10 @@ Do NOT extract full details yet - just identify what objects are present."""
             for idx, obj in enumerate(state.identified_objects)
         ]
 
-    # Phase 2: Single object extraction node - simplified without nested graph
-    # We'll create a mini-extraction loop within this node
+    # Phase 2: Single object extraction node
+    # Uses create_extractor for full validation/retry logic
     def extract_single_object(state: dict, config: RunnableConfig) -> dict:
-        """Extract a single object with simple validation (no full retry graph)."""
+        """Extract a single object using create_extractor for validation/retry logic."""
         messages = state["messages"]
         object_stub = state["object_stub"]
         object_index = state["object_index"]
@@ -1926,41 +1926,37 @@ Do NOT extract full details yet - just identify what objects are present."""
 Use the {target_schema.__name__} schema to structure the complete information."""
 
         # Create messages for extraction
-        extraction_messages = original_messages.copy() if original_messages else []
-        extraction_messages.append(HumanMessage(content=extraction_prompt))
+        extraction_messages = [HumanMessage(content=extraction_prompt)]
+        extraction_messages.extend(original_messages)
 
-        # Bind LLM with target schema
-        bound_llm = llm.bind_tools(
-            [target_schema],
-            tool_choice=target_schema.__name__,
+        # Use create_extractor to get full validation/retry logic
+        bound = create_extractor(llm, tools=[target_schema])
+
+        # Call extractor with stub as existing data for updating
+        trustcall_result = bound.invoke(
+            {
+                "messages": extraction_messages,
+                "existing": {target_schema.__name__: object_stub},
+            },
+            config,
         )
 
-        # Call LLM to extract
-        response = bound_llm.invoke(extraction_messages, config)
+        # Extract results from trustcall_result
+        extracted_objects = trustcall_result.get("responses", [])
+        attempts = trustcall_result.get("attempts", 1)
 
-        # Validate the response
-        extracted_objects = []
+        # Build metadata for each extracted object
         metadata = []
-        attempts = 1
-
-        if isinstance(response, AIMessage) and response.tool_calls:
-            for tc in response.tool_calls:
-                if tc["name"] == target_schema.__name__:
-                    try:
-                        # Validate using the schema
-                        obj = target_schema.model_validate(tc["args"])
-                        extracted_objects.append(obj)
-                        metadata.append(
-                            {
-                                "object_index": object_index,
-                                "stub": object_stub,
-                                "id": tc["id"],
-                            }
-                        )
-                    except Exception as e:
-                        # Validation failed - for now, just log it
-                        # In a full implementation, we'd retry with patches here
-                        logger.error(f"Validation error for object {object_index}: {e}")
+        for idx, obj in enumerate(extracted_objects):
+            # Get the corresponding message if available
+            obj_metadata = {
+                "object_index": object_index,
+                "stub": object_stub,
+            }
+            # Add id from response_metadata if available
+            if idx < len(trustcall_result.get("response_metadata", [])):
+                obj_metadata.update(trustcall_result["response_metadata"][idx])
+            metadata.append(obj_metadata)
 
         return {
             "extracted_objects": extracted_objects,
