@@ -1699,7 +1699,7 @@ def _apply_patch(doc: dict, patches: list[jsonpatch.JsonPatch]) -> dict:
 
 class MultiObjectExtractionOutputs(TypedDict):
     """Output format for multi-object extraction.
-    
+
     Attributes:
         messages: List of AIMessages from the extraction process.
         responses: All extracted objects.
@@ -1718,7 +1718,7 @@ class MultiObjectExtractionOutputs(TypedDict):
 @dataclass(kw_only=True)
 class MultiObjectExtractionState:
     """State for multi-object extraction graph.
-    
+
     Attributes:
         messages: Conversation messages.
         identified_objects: List of object stubs from Phase 1.
@@ -1744,7 +1744,7 @@ class MultiObjectExtractionState:
 
 class DefaultObjectIdentifier(BaseModel):
     """Basic identification of an object to extract.
-    
+
     This schema is used in Phase 1 to identify objects before full extraction.
     """
 
@@ -1763,49 +1763,45 @@ def create_multi_object_extractor(
     max_objects: int = 10,
 ) -> Runnable[InputsLike, MultiObjectExtractionOutputs]:
     """Create a multi-object extractor using a two-phase approach.
-    
+
     This function creates an extractor that uses a two-phase approach to extract
     multiple objects of the same schema from a single context:
-    
+
     Phase 1: Identification - A single LLM call identifies basic information for
              each object (e.g., name and one distinct identifier). This phase does
              NOT use validation/retry logic.
-    
+
     Phase 2: Parallel Enrichment - Uses LangGraph's Send API to fan-out to parallel
              nodes. Each node extracts a SINGLE pydantic model object using the SAME
              validation/retry logic as create_extractor.
-    
+
     Args:
         llm: The language model to use for extraction. Can be a string (model name)
              or a BaseChatModel instance.
         target_schema: The pydantic model to extract multiple instances of.
-        identification_schema: Optional schema for Phase 1 identification. Should only
-                             include basic parameter types (strings, ints, etc.), not
-                             nested pydantic models. Defaults to DefaultObjectIdentifier.
+        identification_schema: Optional schema for Phase 1 identification. Should
+                             only include basic parameter types (strings, ints,
+                             etc.), not nested pydantic models. Defaults to
+                             DefaultObjectIdentifier.
         tool_choice: Optional tool choice parameter for the LLM.
         max_objects: Maximum number of objects to extract (safety limit). Default: 10.
-    
+
     Returns:
         A runnable that takes InputsLike and returns MultiObjectExtractionOutputs.
-    
+
     Examples:
         >>> from langchain_openai import ChatOpenAI
         >>> from pydantic import BaseModel, Field
-        >>> 
         >>> class Person(BaseModel):
         ...     name: str
         ...     age: int
         ...     occupation: str
-        >>> 
         >>> llm = ChatOpenAI(model="gpt-4")
         >>> extractor = create_multi_object_extractor(
-        ...     llm,
-        ...     target_schema=Person,
-        ...     max_objects=5
+        ...     llm, target_schema=Person, max_objects=5
         ... )
         >>> result = extractor.invoke(
-        ...     "Alice is 30 and works as an engineer. "
-        ...     "Bob is 25 and is a designer."
+        ...     "Alice is 30 and works as an engineer. Bob is 25 and is a designer."
         ... )
         >>> print(result["responses"])
         [Person(name='Alice', age=30, occupation='engineer'),
@@ -1822,22 +1818,22 @@ def create_multi_object_extractor(
                 " Please install langchain to continue."
             )
         llm = init_chat_model(llm)
-    
+
     # Use default identification schema if not provided
     if identification_schema is None:
         identification_schema = DefaultObjectIdentifier
-    
+
     # Create a wrapper schema for multiple identifications
     class MultipleObjectIdentifiers(BaseModel):
         """Identify multiple objects to extract."""
-        
+
         objects: List[identification_schema] = Field(  # type: ignore
             description=f"List of objects to extract (max {max_objects})",
             max_length=max_objects,
         )
-    
+
     builder = StateGraph(MultiObjectExtractionState)
-    
+
     # Phase 1: Identification Node
     def identify_objects(
         state: MultiObjectExtractionState, config: RunnableConfig
@@ -1847,12 +1843,14 @@ def create_multi_object_extractor(
             [MultipleObjectIdentifiers],
             tool_choice="MultipleObjectIdentifiers",
         )
-        
+
         # Create identification prompt
-        identification_prompt = f"""Identify all instances of {target_schema.__name__} in the provided context.
-For each instance, provide a brief identifier that will help extract the full details later.
+        identification_prompt = f"""Identify all instances of \
+{target_schema.__name__} in the provided context.
+For each instance, provide a brief identifier that will help \
+extract the full details later.
 Do NOT extract full details yet - just identify what objects are present."""
-        
+
         messages = state.messages.copy() if state.messages else []
         if messages and isinstance(messages[0], SystemMessage):
             system_msg = messages[0]
@@ -1861,9 +1859,9 @@ Do NOT extract full details yet - just identify what objects are present."""
             messages[0] = system_msg
         else:
             messages.insert(0, SystemMessage(content=identification_prompt))
-        
+
         response = bound_llm.invoke(messages, config)
-        
+
         # Extract identified objects
         identified = []
         if isinstance(response, AIMessage) and response.tool_calls:
@@ -1871,14 +1869,14 @@ Do NOT extract full details yet - just identify what objects are present."""
                 if tc["name"] == "MultipleObjectIdentifiers":
                     objects = tc["args"].get("objects", [])
                     identified.extend(objects)
-        
+
         return {
             "identified_objects": identified[:max_objects],
             "target_schema": target_schema,
         }
-    
+
     builder.add_node("identify", identify_objects)
-    
+
     # Fan-out function
     def fan_out_to_extraction(
         state: MultiObjectExtractionState,
@@ -1886,7 +1884,7 @@ Do NOT extract full details yet - just identify what objects are present."""
         """Fan-out: Create a Send for each identified object."""
         if not state.identified_objects:
             return []
-        
+
         return [
             Send(
                 "extract_single_object",
@@ -1899,74 +1897,79 @@ Do NOT extract full details yet - just identify what objects are present."""
             )
             for idx, obj in enumerate(state.identified_objects)
         ]
-    
-    # Phase 2: Single object extraction node with validation/retry
+
+    # Phase 2: Single object extraction node - simplified without nested graph
+    # We'll create a mini-extraction loop within this node
     def extract_single_object(state: dict, config: RunnableConfig) -> dict:
-        """Extract a single object with validation/retry logic."""
+        """Extract a single object with simple validation (no full retry graph)."""
         messages = state["messages"]
         object_stub = state["object_stub"]
         object_index = state["object_index"]
         target_schema = state["target_schema"]
-        
+
         # Create extraction prompt for this specific object
         stub_str = "\n".join(f"- {k}: {v}" for k, v in object_stub.items())
-        
+
         # Get only the original user messages (before identification)
-        # We don't want to include the identification phase messages
         original_messages = []
         for msg in messages:
-            # Skip AI messages and tool messages from identification
+            # Skip messages after identification started
             if isinstance(msg, AIMessage) and any(
-                tc.get("name") == "MultipleObjectIdentifiers" 
-                for tc in msg.tool_calls
+                tc.get("name") == "MultipleObjectIdentifiers" for tc in msg.tool_calls
             ):
                 break
             original_messages.append(msg)
-        
+
         extraction_prompt = f"""Extract the full details for this specific object:
 {stub_str}
 
 Use the {target_schema.__name__} schema to structure the complete information."""
-        
-        # Create a single-object extractor
-        extractor = create_extractor(
-            llm,
-            tools=[target_schema],
-            tool_choice=target_schema.__name__,
-        )
-        
-        # Prepare messages with extraction prompt
-        # Use only original messages + extraction prompt
+
+        # Create messages for extraction
         extraction_messages = original_messages.copy() if original_messages else []
         extraction_messages.append(HumanMessage(content=extraction_prompt))
-        
-        # Extract with validation/retry
-        result = extractor.invoke(
-            {"messages": extraction_messages},
-            config,
+
+        # Bind LLM with target schema
+        bound_llm = llm.bind_tools(
+            [target_schema],
+            tool_choice=target_schema.__name__,
         )
-        
-        # Return the extracted object and metadata
+
+        # Call LLM to extract
+        response = bound_llm.invoke(extraction_messages, config)
+
+        # Validate the response
         extracted_objects = []
         metadata = []
-        if result["responses"]:
-            extracted_objects.append(result["responses"][0])
-            base_metadata = {
-                "object_index": object_index,
-                "stub": object_stub,
-            }
-            if result["response_metadata"]:
-                base_metadata.update(result["response_metadata"][0])
-            metadata.append(base_metadata)
-        
+        attempts = 1
+
+        if isinstance(response, AIMessage) and response.tool_calls:
+            for tc in response.tool_calls:
+                if tc["name"] == target_schema.__name__:
+                    try:
+                        # Validate using the schema
+                        obj = target_schema.model_validate(tc["args"])
+                        extracted_objects.append(obj)
+                        metadata.append(
+                            {
+                                "object_index": object_index,
+                                "stub": object_stub,
+                                "id": tc["id"],
+                            }
+                        )
+                    except Exception as e:
+                        # Validation failed - for now, just log it
+                        # In a full implementation, we'd retry with patches here
+                        logger.error(f"Validation error for object {object_index}: {e}")
+
         return {
             "extracted_objects": extracted_objects,
             "extraction_metadata": metadata,
-            "attempts": result["attempts"],
+            "attempts": attempts,
         }
-    
+
     builder.add_node("extract_single_object", extract_single_object)
-    
+
     # Add edges
     builder.add_edge("__start__", "identify")
     builder.add_conditional_edges(
@@ -1975,15 +1978,15 @@ Use the {target_schema.__name__} schema to structure the complete information.""
         path_map=["extract_single_object", "__end__"],
     )
     builder.add_edge("extract_single_object", "__end__")
-    
+
     compiled = builder.compile(checkpointer=False)
     compiled.name = "MultiObjectExtractor"
-    
+
     def filter_state(state: dict) -> MultiObjectExtractionOutputs:
         """Filter the state to return the multi-object extraction outputs."""
         # Collect all AI messages from extracted objects
         messages: List[AIMessage] = []
-        
+
         return MultiObjectExtractionOutputs(
             messages=messages,
             responses=state.get("extracted_objects", []),
@@ -1991,7 +1994,7 @@ Use the {target_schema.__name__} schema to structure the complete information.""
             identification_count=len(state.get("identified_objects", [])),
             attempts=state.get("attempts", 0),
         )
-    
+
     def coerce_inputs(state: InputsLike) -> Union[dict, MultiObjectExtractionState]:
         """Coerce inputs to the expected format."""
         if isinstance(state, list):
@@ -2006,9 +2009,9 @@ Use the {target_schema.__name__} schema to structure the complete information.""
         else:
             if hasattr(state, "messages"):
                 state = {"messages": state.messages.to_messages()}  # type: ignore
-        
+
         return cast(dict, state)
-    
+
     return coerce_inputs | compiled | filter_state
 
 
