@@ -1926,8 +1926,8 @@ Do NOT extract full details yet - just identify what objects are present."""
 Use the {target_schema.__name__} schema to structure the complete information."""
 
         # Create messages for extraction
-        extraction_messages = [HumanMessage(content=extraction_prompt)]
-        extraction_messages.extend(original_messages)
+        extraction_messages = original_messages.copy() if original_messages else []
+        extraction_messages.append(HumanMessage(content=extraction_prompt))
 
         # Use create_extractor to get full validation/retry logic
         bound = create_extractor(llm, tools=[target_schema])
