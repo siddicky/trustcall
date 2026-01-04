@@ -1930,7 +1930,9 @@ Use the {target_schema.__name__} schema to structure the complete information.""
         extraction_messages.append(HumanMessage(content=extraction_prompt))
 
         # Use create_extractor to get full validation/retry logic
-        bound = create_extractor(llm, tools=[target_schema])
+        bound = create_extractor(
+            llm, tools=[target_schema], tool_choice=target_schema.__name__
+        )
 
         # Call extractor with stub as existing data for updating
         trustcall_result = bound.invoke(
@@ -1942,8 +1944,8 @@ Use the {target_schema.__name__} schema to structure the complete information.""
         )
 
         # Extract results from trustcall_result
-        extracted_objects = trustcall_result.get("responses", [])
-        attempts = trustcall_result.get("attempts", 1)
+        extracted_objects = trustcall_result["responses"]
+        attempts = trustcall_result["attempts"]
 
         # Build metadata for each extracted object
         metadata = []
@@ -1954,7 +1956,7 @@ Use the {target_schema.__name__} schema to structure the complete information.""
                 "stub": object_stub,
             }
             # Add id from response_metadata if available
-            if idx < len(trustcall_result.get("response_metadata", [])):
+            if idx < len(trustcall_result["response_metadata"]):
                 obj_metadata.update(trustcall_result["response_metadata"][idx])
             metadata.append(obj_metadata)
 
