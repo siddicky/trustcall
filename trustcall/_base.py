@@ -1982,8 +1982,11 @@ Use the {target_schema.__name__} schema to structure the complete information.""
 
     def filter_state(state: dict) -> MultiObjectExtractionOutputs:
         """Filter the state to return the multi-object extraction outputs."""
-        # Collect all AI messages from extracted objects
-        messages: List[AIMessage] = []
+        # Collect all AI messages from the state (extraction process)
+        raw_messages = state.get("messages", [])
+        messages: List[AIMessage] = [
+            m for m in raw_messages if isinstance(m, AIMessage)
+        ]
 
         return MultiObjectExtractionOutputs(
             messages=messages,
