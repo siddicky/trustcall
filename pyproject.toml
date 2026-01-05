@@ -7,7 +7,8 @@ requires-python = "<4.0,>=3.10"
 dependencies = [
     "langgraph>=0.2.25",
     "dydantic<1.0.0,>=0.0.8",
-    "jsonpatch<2.0,>=1.33"
+    "jsonpatch<2.0,>=1.33",
+    "langchain-openai>=0.3.35",
 ]
 name = "trustcall"
 version = "0.0.39"
@@ -37,7 +38,6 @@ standard = ["langchain>=0.3"]
 packages = ["trustcall"]
 [tool.setuptools.package-dir]
 "trustcall" = "trustcall"
-
 [tool.ruff]
 lint.select = [
     "E",    # pycodestyle
@@ -66,6 +66,10 @@ docstring-code-line-length = 80
 # --strict-config       any warnings encountered while parsing the `pytest`
 #                       section of the configuration file raise errors.
 addopts = "--strict-markers --strict-config --durations=5 -vv"
+markers = [
+    "asyncio: mark test as an asyncio test",
+    "asyncio_cooperative: mark test as a cooperative asyncio test",
+]
 
 
 [tool.uv.sources]
@@ -82,7 +86,6 @@ exclude = [
     "docs/",
     ".github/",
     "examples.py",
-    "examples/",
     ".editorconfig",
     "db/",
     "evals/",

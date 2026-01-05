@@ -26,16 +26,20 @@
 # Repository Structure
 
 ## Core Package (trustcall/)
-- `__init__.py`: Public API exposing create_extractor, ExtractionInputs, ExtractionOutputs
-- `_base.py`: Main extraction logic, tool handling, JSON patch operations, and core extractor functionality
+- `__init__.py`: Public API exposing create_extractor, create_multi_object_extractor, ExtractionInputs, ExtractionOutputs, MultiObjectExtractionOutputs
+- `_base.py`: Main extraction logic, tool handling, JSON patch operations, single and multi-object extractor functionality
 - `_validation_node.py`: ValidationNode class for tool call validation in LangGraph workflows
 - `py.typed`: Indicates package supports type checking
 
 ## Testing Structure (tests/)
-- `unit_tests/`: Core functionality tests (test_extraction.py, test_strict_existing.py, test_utils.py)
+- `unit_tests/`: Core functionality tests
+  - `test_extraction.py`: Single object extraction, validation, and retry logic
+  - `test_multi_object_extraction.py`: Multi-object extraction with parallel processing
+  - `test_strict_existing.py`: Schema validation and existing data handling
+  - `test_utils.py`: Utility functions like patch application and type conversion
 - `evals/`: Evaluation benchmarks using LangSmith for model comparison (test_evals.py)
 - `cassettes/`: VCR cassettes for mocking API responses in tests
-- `conftest.py`: Pytest configuration with asyncio backend setup
+- `conftest.py`: Pytest configuration with anyio backend setup
 
 ## Configuration and Build
 - `pyproject.toml`: Project metadata, dependencies, tool configuration (ruff, mypy, pytest)
@@ -65,7 +69,7 @@
 
 ## Development Dependencies
 - Code quality: `ruff` (linting/formatting), `mypy` (type checking)
-- Testing: `pytest`, `pytest-asyncio`, `pytest-socket`, `vcrpy`
+- Testing: `pytest`, `pytest-asyncio-cooperative`, `pytest-socket`, `pytest-xdist`, `vcrpy`, `anyio`
 - LLM providers: `langchain-openai`, `langchain-anthropic`, `langchain-fireworks`
 
 ## Installation Commands
@@ -79,9 +83,11 @@
 # Testing Instructions
 
 ## Test Framework and Structure
-- Uses pytest with asyncio support for async/await testing patterns
+- Uses pytest with pytest-asyncio-cooperative for async/await testing patterns
 - Socket access is disabled by default (`--disable-socket --allow-unix-socket`) to prevent external calls
 - VCR cassettes in tests/cassettes/ and tests/evals/cassettes/ mock API responses
+- Tests using `@pytest.mark.asyncio` are skipped (requires pytest-asyncio-cooperative marker)
+- Pytest configuration in pyproject.toml includes strict marker validation
 
 ## Running Tests
 - `make tests`: Run unit tests with socket restrictions and detailed output
@@ -91,17 +97,62 @@
 
 ## Test Categories
 - **Unit Tests**: Core functionality testing without external API calls
-  - test_extraction.py: Main extractor functionality and retry logic
-  - test_strict_existing.py: Schema validation and existing data handling
+  - test_extraction.py: Single object extraction, retry logic, and schema validation
+  - test_multi_object_extraction.py: Multi-object extraction with parallel processing
+  - test_strict_existing.py: Schema validation strictness and existing data handling
   - test_utils.py: Utility functions like patch application and type conversion
 - **Evaluation Tests**: LangSmith-integrated benchmarks comparing model performance
-  - test_evals.py: Comparative evaluation across different LLM providers
+  - test_evals.py: Comparative evaluation across different LLM providers (requires API keys)
 
 ## Writing Tests
-- Use FakeExtractionModel for mocking LLM responses in unit tests
-- Async tests should use pytest-asyncio decorators
+- Use FakeExtractionModel for mocking LLM responses in single-object tests
+- Use FakeMultiExtractionModel for mocking multi-object extraction scenarios
+- Async tests should use `@pytest.mark.asyncio_cooperative` decorator
 - Mock external API calls using VCR cassettes or custom fake models
 - Follow existing patterns for tool validation and schema testing
 - Test both success and error scenarios, especially for validation failures
+- For multi-object tests, test identification phase, extraction phase, and edge cases (empty results, max limits)
 </testing_instructions>
+
+<architecture_notes>
+# Architecture Notes
+
+## Multi-Object Extraction
+The `create_multi_object_extractor` function implements a two-phase extraction pattern:
+
+### Phase 1: Identification
+- Uses a single LLM call to identify all instances of the target schema
+- Creates a `MultipleObjectIdentifiers` wrapper schema with a list of identification objects
+- Does NOT use validation/retry logic (simple identification only)
+- Returns basic identifiers (name, context) for each object
+- Respects `max_objects` safety limit
+
+### Phase 2: Parallel Enrichment
+- Uses LangGraph's Send API to create parallel extraction nodes
+- Each node extracts a SINGLE object using the full `create_extractor` logic
+- Benefits from same validation/retry capabilities as single-object extraction
+- Runs in parallel for efficiency
+- Tracks metadata (object_index, stub) for each extraction
+
+### Key Implementation Details
+- State management via `MultiObjectExtractionState` TypedDict
+- Custom identification schema support via `identification_schema` parameter
+- Returns `MultiObjectExtractionOutputs` with responses, metadata, and attempt counts
+- Compiled as a LangGraph StateGraph for execution
+
+## Single-Object Extraction
+The `create_extractor` function handles single or multiple tool extractions:
+
+### Core Logic
+- Binds tools to LLM and validates tool calls
+- Uses JSON patch operations for efficient retries
+- Supports existing schema updates via the `existing` parameter
+- Handles inserts when `enable_inserts=True`
+- Returns validated responses with metadata
+
+### Retry Mechanism
+- On validation error, generates JSON patch to fix the issue
+- More efficient than regenerating entire schema
+- Configurable retry limits and strategies
+</architecture_notes>
 

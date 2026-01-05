@@ -1931,7 +1931,7 @@ Use the {target_schema.__name__} schema to structure the complete information.""
 
         # Use create_extractor to get full validation/retry logic
         bound = create_extractor(
-            llm, tools=[target_schema], tool_choice=target_schema.__name__
+            llm, tools=[target_schema], tool_choice=target_schema.__name__, enable_inserts=True
         )
 
         # Call extractor with stub as existing data for updating

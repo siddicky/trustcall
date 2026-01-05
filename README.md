@@ -4,15 +4,20 @@
 
 ![](_static/cover.png)
 
-LLMs struggle when asked to generate or modify large JSON blobs. `trustcall` solves this by asking the LLM to generate [JSON patch](https://datatracker.ietf.org/doc/html/rfc6902) operations. This is a simpler task that can be done iteratively. This enables:
+LLMs struggle when asked to generate or modify large JSON blobs. `trustcall` solves this by asking the LLM to generate [JSON patch](https://datatracker.ietf.org/doc/html/rfc6902) operations. This is a simpler task that can be done iteratively.
 
-- ⚡ Faster & cheaper generation of structured output.
-- 🐺Resilient retrying of validation errors, even for complex, nested schemas (defined as pydantic, schema dictionaries, or regular python functions)
-- 🧩Acccurate updates to existing schemas, avoiding undesired deletions.
+## Key Features
+
+- ⚡ **Faster & cheaper** generation of structured output
+- 🐺 **Resilient retrying** of validation errors, even for complex, nested schemas (defined as pydantic, schema dictionaries, or regular python functions)
+- 🧩 **Accurate updates** to existing schemas, avoiding undesired deletions
+- 🔀 **Multi-object extraction** with parallel processing and validation
+- 📊 **Metadata tracking** for extraction attempts and object identification
+- 🔧 **Flexible schema definitions** (pydantic, functions, TypedDicts, JSON schemas)
 
 Works flexibly across a number of common LLM workflows like:
 
-- ✂️ Extraction
+- ✂️ Extraction (single and multi-object)
 - 🧭 LLM routing
 - 🤖 Multi-step agent tool use
 
@@ -20,11 +25,35 @@ Works flexibly across a number of common LLM workflows like:
 
 `pip install trustcall`
 
+## Quick Start
+
+```python
+from trustcall import create_extractor, create_multi_object_extractor
+from langchain_openai import ChatOpenAI
+from pydantic import BaseModel
+
+# Define your schema
+class UserInfo(BaseModel):
+    name: str
+    age: int
+
+llm = ChatOpenAI(model="gpt-4o")
+
+# Single object extraction
+extractor = create_extractor(llm, tools=[UserInfo])
+result = extractor.invoke({"messages": [("user", "My name is Alice and I'm 30")]})
+
+# Multi-object extraction
+multi_extractor = create_multi_object_extractor(llm, target_schema=UserInfo)
+result = multi_extractor.invoke("Alice is 30 and Bob is 25")
+```
+
 ## Usage
 
 - [Extracting complex schemas](#complex-schema)
 - [Updating schemas](#updating-schemas)
-- [Simultanous updates & insertions](#simultanous-updates--insertions)
+- [Simultaneous updates & insertions](#simultaneous-updates--insertions)
+- [Multi-object extraction](#multi-object-extraction)
 
 ## Why trustcall?
 
@@ -487,7 +516,7 @@ Output:
 
 No fields omitted, and the important new information is seamlessly integrated.
 
-### Simultaneous generation & updating
+### Simultaneous Updates & Insertions
 
 Both problems above (difficulty with type-safe generation of complex schemas & difficulty with updating existing schemas) are compounded when you want the LLM to handle **both** updates **and** inserts.
 
@@ -643,6 +672,81 @@ ID: New
   ]
 }
 ```
+
+## Multi-object Extraction
+
+When you need to extract **multiple instances** of the same schema from a single context (e.g., extracting all people mentioned in a conversation, or all products from a catalog description), `trustcall` provides `create_multi_object_extractor` with a two-phase approach:
+
+**Phase 1: Identification** - A single LLM call identifies basic information for each object (e.g., name and one distinct identifier)
+
+**Phase 2: Parallel Enrichment** - Uses LangGraph's Send API to fan out to parallel nodes, where each node extracts a SINGLE object using the SAME validation/retry logic as `create_extractor`
+
+This approach is more efficient and reliable than asking the LLM to generate multiple complex objects in a single call.
+
+### Example: Extracting Multiple People
+
+```python
+from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
+from trustcall import create_multi_object_extractor
+
+
+class Person(BaseModel):
+    """A person schema for extraction."""
+    name: str = Field(description="Person's full name")
+    age: int = Field(description="Person's age")
+    occupation: str = Field(description="Person's occupation")
+
+
+llm = ChatOpenAI(model="gpt-4o")
+
+# Create the multi-object extractor
+extractor = create_multi_object_extractor(
+    llm,
+    target_schema=Person,
+    max_objects=5  # Safety limit
+)
+
+# Extract multiple people from text
+result = extractor.invoke(
+    "Alice is 30 and works as an engineer. Bob is 25 and is a designer. "
+    "Charlie is 35 and works as a teacher."
+)
+
+print(result["responses"])
+# [Person(name='Alice', age=30, occupation='engineer'),
+#  Person(name='Bob', age=25, occupation='designer'),
+#  Person(name='Charlie', age=35, occupation='teacher')]
+
+print(f"Extracted {result['identification_count']} people")
+print(f"Total attempts: {result['attempts']}")
+```
+
+### Custom Identification Schema
+
+You can provide a custom identification schema for more control over Phase 1:
+
+```python
+class PersonIdentifier(BaseModel):
+    """Custom identifier for a person."""
+    person_name: str = Field(description="Name of the person")
+    mentioned_in: str = Field(description="Where they were mentioned")
+
+
+extractor = create_multi_object_extractor(
+    llm,
+    target_schema=Person,
+    identification_schema=PersonIdentifier,
+    max_objects=10
+)
+```
+
+The multi-object extractor automatically handles:
+- Parallel extraction with validation/retry for each object
+- Metadata tracking (object index, identification stub)
+- Safety limits to prevent excessive API calls
+
+**For a complete working demo with real aviation data, see [`examples/spirit_airlines_demo.py`](examples/spirit_airlines_demo.py).**
 
 ## More Examples
 
