@@ -103,6 +103,20 @@ class CustomIdentifier(BaseModel):
     mentioned_in: str = Field(description="Where they were mentioned")
 
 
+class Address(BaseModel):
+    """Address schema."""
+
+    city: str = Field(description="City name")
+    zipcode: str = Field(description="Zip code")
+
+
+class UserWithAddress(BaseModel):
+    """User with address schema."""
+
+    name: str = Field(description="User's name")
+    address: Address = Field(description="User's address")
+
+
 @pytest.mark.asyncio
 async def test_multi_object_extraction_basic():
     """Test basic multi-object extraction with two persons."""
@@ -485,3 +499,59 @@ async def test_multi_object_extraction_metadata():
         assert "stub" in meta
         assert "name" in meta["stub"]
         assert "distinguishing_context" in meta["stub"]
+
+
+@pytest.mark.asyncio
+async def test_multi_object_extraction_nested_schema():
+    """Test extraction with nested schema."""
+    # Reset the global index for this test
+    if hasattr(FakeMultiExtractionModel, "_global_index"):
+        FakeMultiExtractionModel._global_index = 0
+
+    # Phase 1: Identification
+    identification_response = AIMessage(
+        content="Identified users",
+        tool_calls=[
+            {
+                "id": f"identify_{uuid.uuid4()}",
+                "name": "MultipleObjectIdentifiers",
+                "args": {
+                    "objects": [
+                        {"name": "User1", "distinguishing_context": "NYC user"},
+                    ]
+                },
+            }
+        ],
+    )
+
+    # Phase 2: Extraction
+    user_response = AIMessage(
+        content="Extracted User1",
+        tool_calls=[
+            {
+                "id": f"person_{uuid.uuid4()}",
+                "name": "UserWithAddress",
+                "args": {
+                    "name": "User1",
+                    "address": {"city": "New York", "zipcode": "10001"},
+                },
+            }
+        ],
+    )
+
+    model = FakeMultiExtractionModel(
+        responses=[identification_response, user_response]
+    )
+
+    extractor = create_multi_object_extractor(
+        model, target_schema=UserWithAddress
+    )
+
+    result = await extractor.ainvoke("User1 lives in NYC 10001")
+
+    assert len(result["responses"]) == 1
+    user = result["responses"][0]
+    assert isinstance(user.address, Address)
+    assert user.name == "User1"
+    assert user.address.city == "New York"
+    assert user.address.zipcode == "10001"
