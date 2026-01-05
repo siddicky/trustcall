@@ -25,6 +25,7 @@ Works flexibly across a number of common LLM workflows like:
 - [Extracting complex schemas](#complex-schema)
 - [Updating schemas](#updating-schemas)
 - [Simultanous updates & insertions](#simultanous-updates--insertions)
+- [Multi-object extraction](#multi-object-extraction)
 
 ## Why trustcall?
 
@@ -643,6 +644,49 @@ ID: New
   ]
 }
 ```
+
+### Multi-object extraction
+
+When you need to extract multiple objects of the same type from a single context (e.g., extracting multiple `Person` objects from a conversation), a single LLM call to extract all objects at once can lead to inconsistent quality, missing objects, or higher token costs.
+
+The `create_multi_object_extractor()` function solves this using a two-phase extraction approach:
+
+1. **Phase 1 (Identification)**: A single LLM call identifies all objects using a simple schema
+2. **Phase 2 (Parallel Enrichment)**: Fan-out via LangGraph's `Send` API extracts full details for each object in parallel
+
+```python
+from trustcall import create_multi_object_extractor
+from pydantic import BaseModel, Field
+
+class Person(BaseModel):
+    name: str = Field(description="Person's full name")
+    age: int = Field(description="Person's age")
+    occupation: str = Field(description="Person's occupation")
+
+# Create multi-object extractor
+extractor = create_multi_object_extractor(
+    llm=llm,  # Any BaseChatModel instance
+    target_schema=Person,
+    max_objects=10,  # Safety limit
+)
+
+# Extract multiple people
+result = extractor.invoke(
+    "Alice is 30 and works as an engineer. Bob is 25 and is a designer."
+)
+
+# Access extracted objects
+for person in result["responses"]:
+    print(f"{person.name}: {person.age}, {person.occupation}")
+# Alice: 30, engineer
+# Bob: 25, designer
+```
+
+The result includes:
+- `responses`: List of extracted Pydantic objects
+- `identification_count`: Number of objects identified in Phase 1
+- `response_metadata`: Metadata for each object including index and stub information
+- `attempts`: Total extraction attempts across all parallel nodes
 
 ## More Examples
 
