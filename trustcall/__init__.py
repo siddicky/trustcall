@@ -5,10 +5,18 @@ validate, and correct structured outputs from language models. It supports
 patch-based extraction for efficient and accurate updates to existing schemas.
 """
 
-from trustcall._base import ExtractionInputs, ExtractionOutputs, create_extractor
+from trustcall._base import (
+    ExtractionInputs,
+    ExtractionOutputs,
+    MultiObjectExtractionOutputs,
+    create_extractor,
+    create_multi_object_extractor,
+)
 
 __all__ = [
     "create_extractor",
+    "create_multi_object_extractor",
     "ExtractionInputs",
     "ExtractionOutputs",
+    "MultiObjectExtractionOutputs",
 ]

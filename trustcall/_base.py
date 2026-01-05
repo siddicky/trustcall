@@ -43,9 +43,8 @@ from langchain_core.prompt_values import PromptValue
 from langchain_core.runnables import Runnable, RunnableConfig
 from langchain_core.runnables.config import get_executor_for_config
 from langchain_core.tools import BaseTool, InjectedToolArg, create_schema_from_function
-from langgraph.constants import Send
 from langgraph.graph import StateGraph, add_messages
-from langgraph.types import Command
+from langgraph.types import Command, Send
 from langgraph.utils.runnable import RunnableCallable
 from pydantic import (
     BaseModel,
@@ -1698,9 +1697,330 @@ def _apply_patch(doc: dict, patches: list[jsonpatch.JsonPatch]) -> dict:
         raise
 
 
+class MultiObjectExtractionOutputs(TypedDict):
+    """Output format for multi-object extraction.
+
+    Attributes:
+        messages: List of AIMessages from the extraction process.
+        responses: All extracted objects.
+        response_metadata: Metadata for each object including index.
+        identification_count: How many objects were identified in Phase 1.
+        attempts: Total attempts across all parallel extractions.
+    """
+
+    messages: List[AIMessage]
+    responses: List[BaseModel]
+    response_metadata: List[dict[str, Any]]
+    identification_count: int
+    attempts: int
+
+
+@dataclass(kw_only=True)
+class MultiObjectExtractionState:
+    """State for multi-object extraction graph.
+
+    Attributes:
+        messages: Conversation messages.
+        identified_objects: List of object stubs from Phase 1.
+        extracted_objects: List of extracted objects (reduced with operator.add).
+        extraction_metadata: Metadata for each extraction (reduced with operator.add).
+        target_schema: The schema to extract.
+        attempts: Total number of attempts (reduced with operator.add).
+    """
+
+    messages: Annotated[List[AnyMessage], _reduce_messages] = field(
+        default_factory=list
+    )
+    identified_objects: List[dict] = field(default_factory=list)
+    extracted_objects: Annotated[List[BaseModel], operator.add] = field(
+        default_factory=list
+    )
+    extraction_metadata: Annotated[List[dict], operator.add] = field(
+        default_factory=list
+    )
+    target_schema: Optional[Type[BaseModel]] = field(default=None)
+    attempts: Annotated[int, operator.add] = field(default=0)
+
+
+class DefaultObjectIdentifier(BaseModel):
+    """Basic identification of an object to extract.
+
+    This schema is used in Phase 1 to identify objects before full extraction.
+    """
+
+    name: str = Field(description="Name or identifier for this object")
+    distinguishing_context: str = Field(
+        description="Brief context snippet that uniquely identifies this object"
+    )
+
+
+def create_multi_object_extractor(
+    llm: str | BaseChatModel,
+    *,
+    target_schema: Type[BaseModel],
+    identification_schema: Optional[Type[BaseModel]] = None,
+    tool_choice: Optional[str] = None,
+    max_objects: int = 10,
+) -> Runnable[InputsLike, MultiObjectExtractionOutputs]:
+    """Create a multi-object extractor using a two-phase approach.
+
+    This function creates an extractor that uses a two-phase approach to extract
+    multiple objects of the same schema from a single context:
+
+    Phase 1: Identification - A single LLM call identifies basic information for
+             each object (e.g., name and one distinct identifier). This phase does
+             NOT use validation/retry logic.
+
+    Phase 2: Parallel Enrichment - Uses LangGraph's Send API to fan-out to parallel
+             nodes. Each node extracts a SINGLE pydantic model object using the SAME
+             validation/retry logic as create_extractor.
+
+    Args:
+        llm: The language model to use for extraction. Can be a string (model name)
+             or a BaseChatModel instance.
+        target_schema: The pydantic model to extract multiple instances of.
+        identification_schema: Optional schema for Phase 1 identification. Should
+                             only include basic parameter types (strings, ints,
+                             etc.), not nested pydantic models. Defaults to
+                             DefaultObjectIdentifier.
+        tool_choice: Optional tool choice parameter for the LLM.
+        max_objects: Maximum number of objects to extract (safety limit). Default: 10.
+
+    Returns:
+        A runnable that takes InputsLike and returns MultiObjectExtractionOutputs.
+
+    Examples:
+        >>> from langchain_openai import ChatOpenAI
+        >>> from pydantic import BaseModel, Field
+        >>> class Person(BaseModel):
+        ...     name: str
+        ...     age: int
+        ...     occupation: str
+        >>> llm = ChatOpenAI(model="gpt-4")
+        >>> extractor = create_multi_object_extractor(
+        ...     llm, target_schema=Person, max_objects=5
+        ... )
+        >>> result = extractor.invoke(
+        ...     "Alice is 30 and works as an engineer. Bob is 25 and is a designer."
+        ... )
+        >>> print(result["responses"])
+        [Person(name='Alice', age=30, occupation='engineer'),
+         Person(name='Bob', age=25, occupation='designer')]
+    """
+    if isinstance(llm, str):
+        try:
+            from langchain.chat_models import init_chat_model
+        except ImportError:
+            raise ImportError(
+                "Creating extractors from a string requires langchain>=0.3.0,"
+                " as well as the provider-specific package"
+                " (like langchain-openai, langchain-anthropic, etc.)"
+                " Please install langchain to continue."
+            )
+        llm = init_chat_model(llm)
+
+    # Use default identification schema if not provided
+    if identification_schema is None:
+        identification_schema = DefaultObjectIdentifier
+
+    # Create a wrapper schema for multiple identifications
+    class MultipleObjectIdentifiers(BaseModel):
+        """Identify multiple objects to extract."""
+
+        objects: List[identification_schema] = Field(  # type: ignore
+            description=f"List of objects to extract (max {max_objects})",
+            max_length=max_objects,
+        )
+
+    builder = StateGraph(MultiObjectExtractionState)
+
+    # Phase 1: Identification Node
+    def identify_objects(
+        state: MultiObjectExtractionState, config: RunnableConfig
+    ) -> dict:
+        """Phase 1: Identify objects without validation/retry."""
+        bound_llm = llm.bind_tools(
+            [MultipleObjectIdentifiers],
+            tool_choice="MultipleObjectIdentifiers",
+        )
+
+        # Create identification prompt
+        identification_prompt = f"""Identify all instances of \
+{target_schema.__name__} in the provided context.
+For each instance, provide a brief identifier that will help \
+extract the full details later.
+Do NOT extract full details yet - just identify what objects are present."""
+
+        messages = state.messages.copy() if state.messages else []
+        if messages and isinstance(messages[0], SystemMessage):
+            system_msg = messages[0]
+            if isinstance(system_msg.content, str):
+                system_msg.content = identification_prompt + "\n\n" + system_msg.content
+            messages[0] = system_msg
+        else:
+            messages.insert(0, SystemMessage(content=identification_prompt))
+
+        response = bound_llm.invoke(messages, config)
+
+        # Extract identified objects
+        identified = []
+        if isinstance(response, AIMessage) and response.tool_calls:
+            for tc in response.tool_calls:
+                if tc["name"] == "MultipleObjectIdentifiers":
+                    objects = tc["args"].get("objects", [])
+                    identified.extend(objects)
+
+        return {
+            "identified_objects": identified[:max_objects],
+            "target_schema": target_schema,
+        }
+
+    builder.add_node("identify", identify_objects)
+
+    # Fan-out function
+    def fan_out_to_extraction(
+        state: MultiObjectExtractionState,
+    ) -> List[Send]:
+        """Fan-out: Create a Send for each identified object."""
+        if not state.identified_objects:
+            return []
+
+        return [
+            Send(
+                "extract_single_object",
+                {
+                    "messages": state.messages,
+                    "object_stub": obj,
+                    "object_index": idx,
+                    "target_schema": state.target_schema,
+                },
+            )
+            for idx, obj in enumerate(state.identified_objects)
+        ]
+
+    # Phase 2: Single object extraction node
+    # Uses create_extractor for full validation/retry logic
+    def extract_single_object(state: dict, config: RunnableConfig) -> dict:
+        """Extract a single object using create_extractor for validation/retry logic."""
+        messages = state["messages"]
+        object_stub = state["object_stub"]
+        object_index = state["object_index"]
+        target_schema = state["target_schema"]
+
+        # Create extraction prompt for this specific object
+        stub_str = "\n".join(f"- {k}: {v}" for k, v in object_stub.items())
+
+        # Get only the original user messages (before identification)
+        original_messages = []
+        for msg in messages:
+            # Skip messages after identification started
+            if isinstance(msg, AIMessage) and any(
+                tc.get("name") == "MultipleObjectIdentifiers" for tc in msg.tool_calls
+            ):
+                break
+            original_messages.append(msg)
+
+        extraction_prompt = f"""Extract the full details for this specific object:
+{stub_str}
+
+Use the {target_schema.__name__} schema to structure the complete information."""
+
+        # Create messages for extraction
+        extraction_messages = original_messages.copy() if original_messages else []
+        extraction_messages.append(HumanMessage(content=extraction_prompt))
+
+        # Use create_extractor to get full validation/retry logic
+        bound = create_extractor(
+            llm, tools=[target_schema], tool_choice=target_schema.__name__
+        )
+
+        # Call extractor with stub as existing data for updating
+        trustcall_result = bound.invoke(
+            {
+                "messages": extraction_messages,
+                "existing": {target_schema.__name__: object_stub},
+            },
+            config,
+        )
+
+        # Extract results from trustcall_result
+        extracted_objects = trustcall_result["responses"]
+        attempts = trustcall_result["attempts"]
+
+        # Build metadata for each extracted object
+        metadata = []
+        for idx, obj in enumerate(extracted_objects):
+            # Get the corresponding message if available
+            obj_metadata = {
+                "object_index": object_index,
+                "stub": object_stub,
+            }
+            # Add id from response_metadata if available
+            if idx < len(trustcall_result["response_metadata"]):
+                obj_metadata.update(trustcall_result["response_metadata"][idx])
+            metadata.append(obj_metadata)
+
+        return {
+            "extracted_objects": extracted_objects,
+            "extraction_metadata": metadata,
+            "attempts": attempts,
+        }
+
+    builder.add_node("extract_single_object", extract_single_object)
+
+    # Add edges
+    builder.add_edge("__start__", "identify")
+    builder.add_conditional_edges(
+        "identify",
+        fan_out_to_extraction,
+        path_map=["extract_single_object", "__end__"],
+    )
+    builder.add_edge("extract_single_object", "__end__")
+
+    compiled = builder.compile(checkpointer=False)
+    compiled.name = "MultiObjectExtractor"
+
+    def filter_state(state: dict) -> MultiObjectExtractionOutputs:
+        """Filter the state to return the multi-object extraction outputs."""
+        # Collect all AI messages from the state (extraction process)
+        raw_messages = state.get("messages", [])
+        messages: List[AIMessage] = [
+            m for m in raw_messages if isinstance(m, AIMessage)
+        ]
+
+        return MultiObjectExtractionOutputs(
+            messages=messages,
+            responses=state.get("extracted_objects", []),
+            response_metadata=state.get("extraction_metadata", []),
+            identification_count=len(state.get("identified_objects", [])),
+            attempts=state.get("attempts", 0),
+        )
+
+    def coerce_inputs(state: InputsLike) -> Union[dict, MultiObjectExtractionState]:
+        """Coerce inputs to the expected format."""
+        if isinstance(state, list):
+            return {"messages": state}
+        if isinstance(state, str):
+            return {"messages": [{"role": "user", "content": state}]}
+        if isinstance(state, PromptValue):
+            return {"messages": state.to_messages()}
+        if isinstance(state, dict):
+            if isinstance(state.get("messages"), PromptValue):
+                state = {**state, "messages": state["messages"].to_messages()}  # type: ignore
+        else:
+            if hasattr(state, "messages"):
+                state = {"messages": state.messages.to_messages()}  # type: ignore
+
+        return cast(dict, state)
+
+    return coerce_inputs | compiled | filter_state
+
+
 __all__ = [
     "create_extractor",
+    "create_multi_object_extractor",
     "ensure_tools",
     "ExtractionInputs",
     "ExtractionOutputs",
+    "MultiObjectExtractionOutputs",
 ]
