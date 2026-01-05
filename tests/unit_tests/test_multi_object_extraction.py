@@ -124,10 +124,6 @@ async def test_multi_object_extraction_basic():
     if hasattr(FakeMultiExtractionModel, "_global_index"):
         FakeMultiExtractionModel._global_index = 0
 
-    # Reset the global index for this test
-    if hasattr(FakeMultiExtractionModel, "_global_index"):
-        FakeMultiExtractionModel._global_index = 0
-
     # Phase 1: Identification response
     identification_response = AIMessage(
         content="Identified 2 people",
