@@ -24,7 +24,7 @@ Works flexibly across a number of common LLM workflows like:
 
 - [Extracting complex schemas](#complex-schema)
 - [Updating schemas](#updating-schemas)
-- [Simultanous updates & insertions](#simultanous-updates--insertions)
+- [Simultaneous updates & insertions](#simultanous-updates--insertions)
 - [Multi-object extraction](#multi-object-extraction)
 
 ## Why trustcall?
